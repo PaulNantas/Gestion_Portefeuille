@@ -1,0 +1,174 @@
+---
+title: "Gestion de Portefeuille"
+subtitle: "TP-4: Impact de la matrice de covariance dans le modèle MV"
+author: "POUPARD Paul - NANTAS Paul - SPRIET Thibault - UNG Théophile"
+date: "Février-Mars 2021"
+output: 
+  pdf_document:
+    keep_tex: true
+    fig_caption: yes
+    latex_engine: pdflatex
+    extra_dependencies: ["float"]
+geometry: margin=1in
+
+header-includes:
+  - \usepackage[utf8]{inputenc}
+  - \usepackage{float}
+  - \floatplacement{figure}{H}
+
+bibliography: ../../library.bib
+csl: ../../apa.csl
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(fig.pos = "h", out.extra = "")
+```
+
+```{r load-libraries, include=TRUE, echo=TRUE, message=FALSE, warning=FALSE}
+library(xts)
+library(hornpa)
+library(lubridate)
+library(xtable)
+library(quantmod)
+library(PerformanceAnalytics)
+library(TTR)
+library(lubridate)
+library(roll)
+#library(Hmisc)
+library(nFactors)
+library(kableExtra)
+library(broom)
+library(quadprog)
+get.src.folder <- function() {
+  path.expand("../GP/src")
+}
+get.data.folder <- function() {
+  path.expand("../GP/data")
+}
+source(file.path(get.src.folder(), 'utils.R'))
+source(file.path(get.src.folder(), 'FileUtils.R'))
+```
+
+# Données
+
+On utilise la base de données "MultiAsset" du paquet FRAPO:
+
+```{r, echo=T, message=FALSE, warning=FALSE}
+library(FRAPO)
+data(MultiAsset)
+R <- returnseries(MultiAsset, percentage=F, trim=T)
+```
+
+Quelques statistiques descriptives sont résumées ci-dessous:
+
+```{r ret-moments, echo=FALSE}
+statNames <- c("mean", "std dev", "skewness", "kurtosis")
+symbols <- colnames(R)
+mo <- matrix(NA, nrow=length(symbols), ncol=length(statNames))
+n <- 1
+for(s in symbols) {
+  ts <- R[, s]
+  mo[n,] <- c(mean(ts), sd(ts), skewness(ts), kurtosis(ts))
+  n <- n+1
+}
+colnames(mo) <- statNames
+rownames(mo) <- symbols
+```
+
+```{r show-stats, echo=FALSE}
+kbl(mo, "latex", caption="Summary Statistics", booktabs=T) %>%
+  kable_styling(latex_options=c("stripped", "HOLD_position"))
+```
+\ 
+
+## Etude de la matrice de covariance
+
+On se propose d'étudier la matrice de covariance à l'aide de la formule de Stevens pour la matrice d'information $\mathcal{I} = \Sigma^{-1}$.
+
+```{r}
+sigma <- cov(R)
+sigma.inverse <- solve(sigma)
+```
+
+- Pour chaque actif, estimer le modèle 
+
+$$
+R_{i,t} = \beta_0 + \beta_i^T R_t^{(-i)} + \epsilon_{i,t}
+$$
+avec $R_t^{(-i)}$ vecteur de rendement de tous les actifs sauf l'actif $i$, $\epsilon_{i,t} \sim \mathcal{N}(0, s_i^2)$
+
+```{r}
+  sigma.i <- mo[,"std dev"]
+  R_i.t <- lapply(names(R), function(titre) {
+    r_i <- R[names(R) != titre]
+    tmp <- matrix(unlist(R[names(R) != titre]),ncol=9,  byrow = FALSE )
+    reg <- lm(unlist(R[titre]) ~ tmp)
+    #print(summary(reg))
+    k=length(reg$coefficients)-1 #Subtract one to ignore intercept
+    SSE=sum(reg$residuals**2)
+    n=length(reg$residuals)
+    si2 = sqrt(SSE/(n-(1+k))) #Residual Standard Error
+    
+    beta.i <- coef(reg)[2:10]
+    beta.0 <- coef(reg)[1]
+    
+    R_final <- beta.0 +  (matrix(unlist(r_i), ncol = 9, byrow = FALSE) %*% beta.i)
+    
+      return (c(beta.i, si2))
+    })
+names(R_i.t) <- names(R)
+```
+
+- Trier les modèles par $R_i^2$ décroissant. En déduire les actifs qui sont susceptibles de recevoir un poids important dans le portefeuille optimal MV.
+
+```{r}
+#calcul de Ri**2
+R.i2 <- c()
+for (k in 1:length(sigma.i)) {
+    
+  R.i2 = c(R.i2,1- (1 / (sigma.inverse[k,k] * sigma.i[k]**2)))
+  
+}
+
+R.i2 = sort(R.i2, decreasing = TRUE)
+print(R.i2)
+```
+Avec les résltats obtenus, on peut raisonnablement penser que l'actif RUA est susceptible de recevoir un poids important dans le portefeuille optimal MV. L'actif GSPC possédant sensiblement les mêmes caractéristiques que l'actif RUA mais on peu moins rentable jouera sûrement un rôle moins important dans notres portefeuille.
+
+A l'opposé l'actif N225 se trouvant être relativement risqué comparativement aux autres actifs (avec stddev = 0.0437702) et possédant un rentabilité pas meilleure que les autres actifs, le N225 ne jouera sûrement pas un rôle important dans notre portefeuille.
+
+On peut prédire que l'actif EEM ne sera pas prépondérant dans le portefeuille dans la mesure ou il possède un moins bon rendement que le RUA et un risque supérieur (std dev de RUA = 0.050 contre std dev de EEM = 0.081).
+
+De plus comparativement on peut prédire que le GREXP jouera un rôle plus important que la BG05.L car plus possédant un meilleur rendement et moins averse au risque. 
+
+- Calculer les poids optimaux du modèle MV, et comparer avec les résultats des régressions.
+```{r}
+#calcul des poids 
+mu <- mo[,"mean"]
+wi <- c()
+wi2 <- c()
+for (i in 1:length(sigma.i)){
+  
+  #methode avec 1-Ri**2
+  wi = c(wi ,( mu[i] - unlist(R_i.t[i])[1:9]%*%mu[-i])/ ( (1-R.i2[i])*sigma.i[i]**2) )
+  #methode avec Si carré calculé à partir des regresions
+  wi2 = c(wi2 ,( mu[i] - unlist(R_i.t[i])[1:9]%*%mu[-i])/ (unlist(R_i.t[i])[10]**2 ) )
+  
+}
+names(wi) <- names(R)
+wi = sort(wi, decreasing = TRUE)
+wi = wi/sum(wi)
+print(wi)
+
+names(wi2) <- names(R)
+wi2 = sort(wi2, decreasing = TRUE)
+wi2 = wi2/sum(wi2)
+print(wi2)
+```
+
+Finalement, on observe que GREXP est l'actif qui possède le poids le plus important dans notre portefeuille car possédant notamment un risque mesuré comparativement aux autres actifs. L'actif RUA possède bien un poids important car avec un rendement élevé.
+
+Enfin, l'actif BG05.L possède bien comme prévu un poids négligé dans le portefeuille. 
+
+Néanmoins on peut être un peu surpris par le rôle plutôt important joué par les actifs GLD et GDAXI étant donné leur rendement obtenu par régression pas meilleur que les autres actifs et leur risque plutôt important.

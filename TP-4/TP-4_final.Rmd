@@ -1,0 +1,214 @@
+---
+title: "Gestion de Portefeuille"
+subtitle: "TP-4: Impact de la matrice de covariance dans le modèle MV"
+author: "POUPARD Paul - NANTAS Paul - SPRIET Thibault - UNG Théophile"
+date: "Février-Mars 2021"
+output: 
+  pdf_document:
+    keep_tex: true
+    fig_caption: yes
+    latex_engine: pdflatex
+    extra_dependencies: ["float"]
+geometry: margin=1in
+
+header-includes:
+  - \usepackage[utf8]{inputenc}
+  - \usepackage{float}
+  - \floatplacement{figure}{H}
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(fig.pos = "h", out.extra = "")
+```
+
+```{r load-libraries, include=FALSE, echo=TRUE, message=FALSE, warning=FALSE}
+library(xts)
+library(hornpa)
+library(lubridate)
+library(xtable)
+library(quantmod)
+library(PerformanceAnalytics)
+library(TTR)
+library(lubridate)
+library(roll)
+#library(Hmisc)
+library(nFactors)
+library(kableExtra)
+library(broom)
+library(quadprog)
+get.src.folder <- function() {
+  path.expand("../GP/src")
+}
+get.data.folder <- function() {
+  path.expand("../GP/data")
+}
+source(file.path(get.src.folder(), 'utils.R'))
+source(file.path(get.src.folder(), 'FileUtils.R'))
+```
+
+# Données
+
+On utilise la base de données "MultiAsset" du paquet FRAPO:
+
+```{r, echo=T, message=FALSE, warning=FALSE}
+library(FRAPO)
+data(MultiAsset)
+R <- returnseries(MultiAsset, percentage=F, trim=T)
+```
+
+Quelques statistiques descriptives sont résumées ci-dessous:
+
+```{r ret-moments, echo=FALSE}
+statNames <- c("mean", "std dev", "skewness", "kurtosis")
+symbols <- colnames(R)
+mo <- matrix(NA, nrow=length(symbols), ncol=length(statNames))
+n <- 1
+for(s in symbols) {
+  ts <- R[, s]
+  mo[n,] <- c(mean(ts), sd(ts), skewness(ts), kurtosis(ts))
+  n <- n+1
+}
+colnames(mo) <- statNames
+rownames(mo) <- symbols
+```
+
+```{r show-stats, echo=FALSE}
+kbl(mo, "latex", caption="Summary Statistics", booktabs=T) %>%
+  kable_styling(latex_options=c("stripped", "HOLD_position"))
+```
+\ 
+
+## Etude de la matrice de covariance
+
+On se propose d'étudier la matrice de covariance à l'aide de la formule de Stevens pour la matrice d'information $\mathcal{I} = \Sigma^{-1}$.
+
+```{r}
+sigma <- cov(R)
+sigma.inverse <- solve(sigma)
+```
+
+- Pour chaque actif, estimer le modèle 
+
+$$
+R_{i,t} = \beta_0 + \beta_i^T R_t^{(-i)} + \epsilon_{i,t}
+$$
+avec $R_t^{(-i)}$ vecteur de rendement de tous les actifs sauf l'actif $i$, $\epsilon_{i,t} \sim \mathcal{N}(0, s_i^2)$
+
+```{r}
+  sigma.i <- mo[,"std dev"]
+  R_i.t <- lapply(names(R), function(titre) {
+    r_i <- R[names(R) != titre]
+    tmp <- matrix(unlist(R[names(R) != titre]),ncol=9,  byrow = FALSE )
+    reg <- lm(unlist(R[titre]) ~ tmp)
+    #print(summary(reg))
+    k=length(reg$coefficients)-1 #Subtract one to ignore intercept
+    SSE=sum(reg$residuals**2)
+    n=length(reg$residuals)
+    si2 = sqrt(SSE/(n-(1+k))) #Residual Standard Error
+    
+    beta.i <- coef(reg)[2:10]
+    beta.0 <- coef(reg)[1]
+    
+    R_final <- beta.0 +  (matrix(unlist(r_i), ncol = 9, byrow = FALSE) %*% beta.i)
+    
+      return (c(beta.i, si2))
+    })
+names(R_i.t) <- names(R)
+```
+
+- Trier les modèles par $R_i^2$ décroissant. En déduire les actifs qui sont susceptibles de recevoir un poids important dans le portefeuille optimal MV.
+
+Nous allons calculer les $R_i^2$ à partir de la formule : 
+$$
+\begin{aligned}
+  R_i^2 = 1- \frac{1}{\mathcal{I}_{i,i} \sigma^2_i} = \\
+ \end{aligned}
+$$
+
+```{r}
+#calcul de Ri**2
+R.i2 <- c()
+for (k in 1:length(sigma.i)) {
+    
+  R.i2 = c(R.i2,1- (1 / (sigma.inverse[k,k] * sigma.i[k]**2)))
+  
+}
+R.i2 = sort(R.i2, decreasing = TRUE)
+```
+
+```{r Ri2, echo=FALSE}
+kbl(R.i2, "latex", caption="Ri2 à partir de la formule de Stevens",col.names="Ri2", booktabs=T) %>%
+  kable_styling(latex_options=c("stripped", "HOLD_position"))
+```
+On observe que les indices RUA et GSPC ont un $R_i^2$ très élevé par rapport aux autres indices, ce qui présuppose une place importante dans le portefeuille puisque cela signifie que leur rendement est très bien répliqué par les autres indices. En revanche pour l'or, le $R_i^2$ est très faible, cela signifie que son rendement ne suit pas les mêmes tendances que celui dans les autres indices. Ce résultat n'est pas surprenant car l'or est la valeur refuge par excellence. On s'attend donc à avoir un faible poids pour l'or. 
+
+A l'opposé l'actif N225 se trouvant être relativement risqué comparativement aux autres actifs (avec stddev = 0.0437702) et possédant un rentabilité pas meilleure que les autres actifs, le N225 ne jouera sûrement pas un rôle important dans notre portefeuille.
+
+On peut prédire que l'actif EEM ne sera pas prépondérant dans le portefeuille dans la mesure ou il possède un moins bon rendement que le RUA et un risque supérieur (std dev de RUA = 0.050 contre std dev de EEM = 0.081).
+
+De plus comparativement on peut prédire que le GREXP jouera un rôle plus important que la BG05.L car plus possédant un meilleur rendement et moins averse au risque. 
+
+- Calculer les poids optimaux du modèle MV, et comparer avec les résultats des régressions.
+
+Pour calculer les poids nous allons utiliser la formule suite :
+
+$$
+ w_i(\gamma) = \gamma \frac{\mu_i - \beta_i^T \mu_i^{(-i)}}{s_i^2} = \gamma \frac{\mu_i - \beta_i^T \mu_i^{(-i)}}{\sigma^2_i(1-R_i^2)}
+$$
+
+```{r}
+mu <- mo[,"mean"]
+
+#calcul des poids avec le modèle MV
+A.sum <- matrix(rep(1,length(mu)), ncol=1)
+A.mat <- cbind(mu)
+b <- 1
+qp <- solve.QP(2*sigma, mu*0, A.mat, b, meq=1)
+names(qp$solution) <- names(R)
+w_mv = sort(qp$solution, decreasing = TRUE)
+w_mv = w_mv/sum(w_mv)
+
+#calcul des poids grace à la formule de stevens
+wi <- c()
+wi2 <- c()
+
+for (i in 1:length(sigma.i)){
+
+  #methode avec Si carré calculé à partir des regresions
+  wi = c(wi ,( mu[i] - unlist(R_i.t[i])[1:9]%*%mu[-i])/ (unlist(R_i.t[i])[10]**2 ) )
+  
+  #methode avec 1-Ri**2
+  wi2 = c(wi2 ,( mu[i] - unlist(R_i.t[i])[1:9]%*%mu[-i])/ ( (1-R.i2[i])*sigma.i[i]**2) )
+  
+}
+names(wi) <- names(R)
+wi = sort(wi, decreasing = TRUE)
+wi = wi/sum(wi)
+
+names(wi2) <- names(R)
+wi2 = sort(wi2, decreasing = TRUE)
+wi2 = wi2/sum(wi2)
+a = matrix(c(w_mv, wi), ncol = 2)
+rownames(a) <- names(R)
+colnames(a) <- c("Moyenne-Variance", "Estimation")
+```
+
+```{r poids, echo=FALSE}
+kbl(a, "latex", caption="Allocations des indices", booktabs=T) %>%
+  kable_styling(latex_options=c("stripped", "HOLD_position"))
+
+```
+
+Comme prédit à partir des $R_i^2$, les indices RUA et GSPC ont bien des poids importants dans le portefeuille. On observe cependant que RUA à un poids positif alors que GSPC à un poids négatif. Cela s’explique par le fait que la différence entre le rendement espéré de l’indice et celui du portefeuille de couverture est négatif. 
+On retrouve également le résultat attendu pour l’or qui a bien poid faible.
+
+En revanche, on retrouve l’actif GREXP avec le poids le plus important alors que son $R_i^2$ était relativement faible. Cela s’explique par le fait que GREXP à un risque très faible avec std dev = 0.0101831, qui est la plus faible de tous les actifs. De plus, le rendement espéré de l’indice et celui du portefeuille de couverture doit être grand. 
+
+On remarque également que BG05.L à un poids négatif. Cela s’explique par un rendement bien inférieur à celui du portefeuille de couverture et à un faible $R_i^2$. 
+
+On retrouve donc un portefeuille composé de trois indices principaux (GREXP, RUA et GDAXI), dans lequel le risque est centré sur les facteurs d’arbitrage. Les indices comme GSPC qui reproduisent bien les rendements des autres indices mais qui ont un rendement plus faible sont vendus de façon exagérée pour acheter ces facteurs d’arbitrages.
+
+Cet exemple montre bien les limites du modèle moyenne-variance qui concentre trop le risque sur les actifs qui peuvent être très bien répliqués par d’autres actifs et qui pousse par conséquent à shorter certains actifs et ainsi remettre en cause la fiabilité de notre portefeuille.
+
