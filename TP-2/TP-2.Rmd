@@ -1,0 +1,353 @@
+---
+title: "TP 2"
+author: "Nantas Paul - Poupard Paul - Spriet Thibault - Ung Théophile"
+date: "Février 2021"
+output:
+  pdf_document:
+    fig_caption: yes
+    keep_tex: yes
+    latex_engine: pdflatex
+  html_document:
+    df_print: paged
+  word_document: default
+geometry: margin=1in
+header-includes: \usepackage[utf8]{inputenc}
+csl: ../apa.csl
+subtitle: 'TP-2: Droite de Marchés des Capitaux'
+bibliography: ../library.bib
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r load-libraries, include=FALSE, echo=TRUE}
+library(quantmod)
+library(xts)
+library(hornpa)
+library(lubridate)
+library(xtable)
+library(PerformanceAnalytics)
+library(TTR)
+library(SuppDists)
+library(lubridate)
+library(roll)
+#library(Hmisc)
+library(nFactors)
+library(quadprog)
+library(knitr)
+library(kableExtra)
+library(latex2exp)
+get.src.folder <- function() {
+  path.expand("../GP/src")
+}
+get.data.folder <- function() {
+  path.expand("../GP/data")
+}
+source(file.path(get.src.folder(), 'utils.R'))
+source(file.path(get.src.folder(), 'FileUtils.R'))
+```
+
+# Données
+
+## Séries de rendement quatidien pour 11 valeurs:
+
+```{r, eval=TRUE, echo=TRUE, warning=FALSE}
+daily.ret.file <- file.path(get.data.folder(), "daily.ret.rda")
+load(daily.ret.file)
+kable(table.Stats(daily.ret), "latex", booktabs=T) %>% kable_styling(latex_options="scale_down")
+```
+
+## Rendement annuel moyen:
+
+```{r, echo=TRUE}
+kable(252*100*colMeans(daily.ret), "latex", booktabs=T, digits=1, col.names=c("Rendement (%)"), 
+      caption="Rendement annuel moyen")
+```
+
+## Matrice de corrélation des rendements:
+
+```{r, echo=TRUE}
+correl <- cor(daily.ret)
+correl[lower.tri(correl)] <- NA
+options(knitr.kable.NA = '')
+kable(correl, "latex", booktabs=T, digits=2, caption="Corrélation des rendements quotidiens") %>%
+kable_styling(latex_options="scale_down")
+```
+
+# Droite de Marché des Capitaux (Capital Market Line)
+
++ A partir des calculs présentés en cours, mettre en oeuvre une méthode numérique
+  pour déterminer le portefeuille tangent quand les poids des actifs risqués sont contraints à être positifs: $w_i \ge 0$.
+  
+```{r, echo=FALSE}
+tickers <- c("AAPL", "AMZN", "MSFT", "F", "SPY", "QQQ", "XOM", "MMM", "HD", "PG", "KO")
+# covariance matrix
+ret <- daily.ret
+Sigma <- cov(ret) * 252
+# expected return
+mu <- colMeans(ret) * 252
+```
+
+## Portefeuille à Variance Minimale
+
+```{r, echo=TRUE}
+A.mat <- matrix(rep(1,length(mu)), ncol=1)
+b <- 1
+qp <- solve.QP(2*Sigma, mu*0, A.mat, b, meq=1)
+w <- qp$solution
+names(w) <- names(ret)
+w <- data.frame(w)
+names(w) = "allocation"
+min.ret <- sum(qp$solution * mu)
+```
+
+## Calcul de la Frontière 
+Avec $W_i\ge 0$ 
+
+```{r, echo=TRUE}
+mu.star <- seq(from=min.ret+abs(min(mu))/100, to=max(mu)-abs(max(mu))/100, length.out=200)
+mu.free <- 0.03
+
+sol <- NULL
+for(mu.s in mu.star) {
+  
+# constraints: 2 equality and 1 inequality
+A.sum <- matrix(rep(1,length(mu)), ncol=1)
+A.mat <- cbind(A.sum, mu, diag(length(mu)))
+b <- c(1, mu.s, rep(0, length(mu)))
+qp <- solve.QP(2*Sigma, rep(0,length(mu)), A.mat, b, meq=2)
+sharpe <- (mu.s - mu.free) / sqrt(qp$value)
+  tmp <- matrix(c(mu.s, sqrt(qp$value), sharpe, qp$solution), nrow=1)
+
+if(is.null(sol)) {
+  sol <- tmp  
+} else {
+  sol <- rbind(sol, tmp)
+}
+}
+```
+
+```{r, echo=FALSE}
+colnames(sol) <- c("mu", "stdev", "Sharpe", tickers)
+indx= ( sol[,3] == max(sol[,3]))
+sol.t = sol[indx,]
+tickers.t = sol[indx,4:dim(sol)[2]]
+
+indx2= ( sol[,2] == min(sol[,2]))
+sol.minvar = sol[indx2,]
+tickers.minvar = sol[indx2,4:dim(sol)[2]]
+w <- qp$solution
+names(w) <- names(ret)
+w <- data.frame(w)
+names(w) = "allocation"
+```
+
+```{r, echo=FALSE}
+kable(list(tickers.minvar,sol[indx2,1:2]), "latex", booktabs=T, digits=5, col.names=c("Allocations"), 
+      caption="Portefeuille risqué de varaince minimale avec les poids positifs")
+```
+```{r, echo=FALSE}
+kable(list(tickers.t,sol[indx,1:2]), "latex", booktabs=T, digits=5, col.names=c("Allocations"), 
+      caption="Portefeuille risqué tangent avec les poids positifs" )
+```
+On remarque que les 2 portefeuilles sont composés à plus de 70% de deux titres. Le portefeuille de variance minimale de KO (coca-cola) à 36% et de PG (Procter & Gamble) à 42% qui sont deux entreprises de consommable. Ces 2 actions sont, d’après le tableau 2 corrélées à 57%.
+
+Le tangent quant à lui est composé de AAPL (Apple) à 39% et de AMZN (Amazon) à 33 %. Il est donc composé de deux entreprises des nouvelles technologies. Ces deux actions sont corrélées à 46%.
+
+Les deux portefeuilles sont donc peut diversifier car ils sont chacun composé que de deux actions fortement corrélées.
+
+## Ajout d'un actif sans risque
+
+```{r}
+r.f = 0.03
+mu.star.v  <- seq(from=mu.free, to=0.40, length.out=30)
+n <- length(mu)
+
+# constraints: 1 equality
+optim.with.rf <- function(mu.star) {
+  A.sum <- matrix(mu-mu.free, ncol=1)
+A.mat <- cbind(A.sum, 
+               rep(1, n),
+               diag(n),
+               -diag(n))
+b <- c(mu.star-r.f, 0, rep(0, n), rep(-1, n))
+solve.QP(2*Sigma, rep(0,n), A.mat, b, meq=1)
+}
+
+sol.with.rf <- NULL
+for(mu.star in mu.star.v) {
+  qp <- optim.with.rf(mu.star)
+
+  sharpe <- (mu.star - mu.free) / sqrt(qp$value)
+  tmp <- matrix(c(mu.star, sqrt(qp$value), sharpe, qp$solution), nrow=1)
+
+if(is.null(sol.with.rf)) {
+  sol.with.rf <- tmp  
+} else {
+  sol.with.rf <- rbind(sol.with.rf, tmp)
+}
+}
+
+# tangency portfolio
+w.tangent <- matrix(qp$solution / sum(qp$solution), ncol=1)
+names(w.tangent) <- tickers
+sigma.tangent <- sqrt(t(w.tangent) %*% Sigma %*% w.tangent)
+
+colnames(sol.with.rf) <- c("mu", "stdev", "Sharpe", tickers)
+```
+s
+```{r, echo=FALSE, fig.height=6}
+plot(sol[,"stdev"], sol[,"mu"], type='l', col='black', panel.first=grid(lwd=1.5, col = "black"), lwd=2, xlab=expression(sigma), ylab=expression(mu),
+     ylim=c(0, 0.40), xlim=c(.0, 0.40), bty='n', cex.lab=1.5)
+lines(sol.with.rf[,"stdev"], sol.with.rf[,"mu"], type='l', col='black',lty="dashed", lwd=2)
+for(i in seq_along(tickers)) {
+  text(sqrt(Sigma[i,i]), mu[i], tickers[i], cex=1.2, col="black")
+}
+points(sol.t[2],sol.t[1],cex=3,pch="*",col="red")
+points(sol.minvar[2],sol.minvar[1], cex=3,pch="*",col="blue" )
+legend("topleft", legend=c("Frontière efficiente", "Portefeuille tangent"),
+       col=c("black", "black"), lty=1:2, cex=1.3)
+```
+Sur ce graphique, le point bleu représente le portefeuille de variance minimale et le point rouge le portefeuille tangent.
+
+Comme nous l’avons vue précédemment, le portefeuille tangent est peu varié avec plus de 70% des allocations réparties sur deux titres fortement corrélés. Il conviendrait alors d’investir une partie de son capital dans un actif sans risque pour équilibrer notre portefeuille, avec un rendement plus faible mais moins risqué.
+
+L’autre solution est de diversifier son portefeuille tangent, en imposant ajoutant de nouvelles conditions aux allocations des titres.
+
+
++ Même calcul en ajoutant des contraintes supplémentaires qui vous semblent pertinentes 
+(ex: pas plus de 20% de l'actif risqué alloué à un seul titre, etc.)
+
+## Portefeuille à Variance Minimale 
+Avec $W_i\ge 0$ et $W_i\le 20%$
+On introduit un nouveau paramètre : $lim$. Il va nous permettre d'imposer une valeur maximal au $w_i$.
+
+```{r, echo=FALSE}
+# constraints: maximum limit of w_i
+lim = 0.2
+
+A.sum <- matrix(rep(1,length(mu)), ncol=1)
+A.mat <- cbind(A.sum, diag(length(mu)),-1*diag(length(mu)))
+b <- c(1, rep(0, length(mu)),rep(-lim, length(mu)))
+qp <- solve.QP(2*Sigma, rep(0,length(mu)), A.mat, b, meq=2)
+w <- qp$solution
+names(w) <- names(ret)
+w <- data.frame(w)
+names(w) = "allocation"
+min.ret <- sum(qp$solution * mu)
+```
+
+```{r echo=FALSE}
+kable(w, "latex", booktabs=T, digits=5, col.names=c("Allocations"), 
+      caption="Allocations du portefeuille risqué de varaince minimale avec les poids positifs et inferieurs à 0.2" )
+```
+On remarque que les poids sont bien positifs et inferieurs à 20%. On peut également noter que le portefeuille de variance minimale est plus équilibrer.
+
+## Calcul de la Frontière 
+Avec $W_i\ge 0$ et $W_i \le 20%$
+
+Puisque nous avons ajouter la contrainte supplémentaire sur les $w_i$, la fonction $solve.QP$ ne trouvait plus de solution pour des rendement trop élevé. Nous avons donc dû limiter les rendements à 0,24. Nous avons remarqué que c'est à partir de cette valeur de rendement que la fonction n'arrivait plus à trouver de solution.
+
+```{r, echo=TRUE}
+mu.star <- seq(from=min.ret+abs(min(mu))/100, to=0.24, length.out=200)
+mu.free <- 0.03
+sol <- NULL
+for(mu.s in mu.star) {
+# constraints: 2 equality
+A.sum <- matrix(rep(1,length(mu)), ncol=1)
+A.mat <- cbind(A.sum, mu, diag(length(mu)),-1*diag(length(mu)))
+b <- c(1, mu.s, rep(0, length(mu)),rep(-lim, length(mu)))
+qp <- solve.QP(2*Sigma, rep(0,length(mu)), A.mat, b, meq=2)
+sharpe <- (mu.s - mu.free) / sqrt(qp$value)
+  tmp <- matrix(c(mu.s, sqrt(qp$value), sharpe, qp$solution), nrow=1)
+
+if(is.null(sol)) {
+  sol <- tmp  
+} else {
+  sol <- rbind(sol, tmp)
+}
+}
+```
+
+```{r, echo=FALSE}
+colnames(sol) <- c("mu", "stdev", "Sharpe", tickers)
+
+indx= ( sol[,3] == max(sol[,3]))
+sol.t = sol[indx,]
+tickers.t = sol[indx,4:dim(sol)[2]]
+
+indx2= ( sol[,2] == min(sol[,2]))
+sol.minvar = sol[indx2,]
+
+w <- qp$solution
+names(w) <- names(ret)
+w <- data.frame(w)
+names(w) = "allocation"
+```
+
+```{r, echo=FALSE}
+kable(list(tickers.t,sol[indx,1:2]), "latex", booktabs=T, digits=5, col.names=c("Allocations"), 
+      caption="Portefeuille risqué tangent avec les poids positifs et inferieurs à 0.2" )
+```
+
+## Ajout d'un actif sans risque
+
+```{r, tangent-long}
+r.f = 0.03
+mu.star.v  <- seq(from=mu.free, to=0.30, length.out=30)
+n <- length(mu)
+
+# constraints: 1 equality
+optim.with.rf <- function(mu.star) {
+  A.sum <- matrix(mu-mu.free, ncol=1)
+A.mat <- cbind(A.sum, 
+               rep(1, n),
+               diag(n),
+               -diag(n))
+b <- c(mu.star-r.f, 0, rep(0, n), rep(-lim, n))
+solve.QP(2*Sigma, rep(0,n), A.mat, b, meq=1)
+}
+
+sol.with.rf <- NULL
+for(mu.star in mu.star.v) {
+  qp <- optim.with.rf(mu.star)
+  sharpe <- (mu.star - mu.free) / sqrt(qp$value)
+  tmp <- matrix(c(mu.star, sqrt(qp$value), sharpe, qp$solution), nrow=1)
+
+if(is.null(sol.with.rf)) {
+  sol.with.rf <- tmp  
+} else {
+  sol.with.rf <- rbind(sol.with.rf, tmp)
+}
+}
+
+# tangency portfolio
+w.tangent <- matrix(qp$solution / sum(qp$solution), ncol=1)
+names(w.tangent) <- tickers
+sigma.tangent <- sqrt(t(w.tangent) %*% Sigma %*% w.tangent)
+colnames(sol.with.rf) <- c("mu", "stdev", "Sharpe", tickers)
+```
+
+```{r, echo=FALSE, fig.height=6}
+plot(sol[,"stdev"], sol[,"mu"], type='l', col='black', panel.first=grid(lwd=1.5, col = "black"), lwd=2, xlab=expression(sigma), ylab=expression(mu),
+     ylim=c(0, 0.30), xlim=c(.0, 0.40), bty='n', cex.lab=1.5)
+lines(sol.with.rf[,"stdev"], sol.with.rf[,"mu"], type='l', col='black',lty="dashed", lwd=2)
+for(i in seq_along(tickers)) {
+  text(sqrt(Sigma[i,i]), mu[i], tickers[i], cex=1.2, col="black")
+}
+points(sol.t[2],sol.t[1],cex=3,pch="*",col="red")
+points(sol.minvar[2],sol.minvar[1], cex=3,pch="*",col="blue" )
+legend("topleft", legend=c("Frontière efficiente", "Portefeuille tangent"),
+       col=c("black", "black"), lty=1:2, cex=1.3)
+```
+
+Sur ce graphique, le point bleu représente le portefeuille de variance minimale et le point rouge le portefeuille tangent.
+
+Le portefeuille tangent est plus diversifié avec 4 actions à 20% d’allocation chacune :  AAPL, AMZN, HD, et KO. Nous pouvons calculer le rapport $\frac{\mu}{\sigma}$ pour déterminer si ce portefeuille tangent est mieux optimisé. Das le cadre de la première partie on obtient 
+$$\frac{0.28211}{0.24069}=1.1721$$ 
+Et dans celui de la seconde : 
+$$\frac{0.22601}{0.19773}=1.1430$$
+On remarque donc que ce rapport est plus avantageux sans limiter les $w_i$ à 20%. À la question 1, le portefeuille tangent était composé à plus de 70% d’AAPL et de AMZN. On peut donc en déduire que les actions AAPL et AMZN ont un fort rendement ce qui est confirmé par le tableau 1. Cependant, le tableau 2 nous montre que KO est l’une des actions les moins corrélés avec AAPL et AMZN. D’autre part, notre portefeuille contient également 10% de PG, qui est l’action la moins corrélé avec AMZN et AAPL. Tout cela nous a permis de diversifier notre portefeuille et donc de diminuer le risque.
+Il faut cependant nuancer notre analyse car bien que ces actions soient les moins corrélés de l’indice, leurs corrélations restent relativement élevées (aux alentours de 30%). 
+
