@@ -1,0 +1,451 @@
+---
+title: "Gestion de Portefeuille"
+subtitle: "TP-3: Modèle à un facteur et modèle de Treynor Black"
+author: ["UNG Théophile","POUPARD Paul","NANTAS Paul","SPRIET Thibault"]
+date: "Février-Mars 2020"
+output: 
+  pdf_document:
+    keep_tex: true
+    fig_caption: yes
+    latex_engine: pdflatex
+geometry: margin=1in
+
+header-includes:
+  - \usepackage[utf8]{inputenc}
+  - \usepackage{float}
+  - \usepackage{booktabs}
+
+#bibliography: ../../library.bib
+#csl: ../../apa.csl
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+```
+
+```{r load-libraries, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE}
+
+#install.packages(c("hornpa","lubridate","xtable","PerformanceAnalytics","TTR","lubridate","roll","Hmisc","nFactors","kableExtra","broom","quadprog"))
+
+library(xts)
+library(hornpa)
+library(lubridate)
+library(xtable)
+library(PerformanceAnalytics)
+library(TTR)
+library(lubridate)
+library(roll)
+#library(Hmisc)
+library(nFactors)
+library(kableExtra)
+library(broom)
+library(quadprog)
+```
+
+# Données
+
+## Séries de rendement mensuel pour 11 valeurs:
+
+```{r, eval=TRUE, echo=TRUE, warning=FALSE}
+monthly.ret.file <- "./monthly.ret.rda"
+load(monthly.ret.file)
+index(monthly.ret) <- floor_date(index(monthly.ret), "month")
+```
+
+## Matrice de covariance des rendements:
+
+```{r, echo=TRUE}
+kable(cov(monthly.ret), "latex", booktabs=T) %>%
+kable_styling(latex_options=c("scale_down", "HOLD_position"))
+```
+
+## Rendement moyen mensuel
+
+```{r, echo=TRUE}
+kbl(colMeans(monthly.ret), format="latex", booktabs=T, 
+    col.names=c("Rendement"), caption="Rendement moyen mensuel") %>%
+    kable_styling(latex_options="HOLD_position")
+```
+
+
+## Taux sans risque
+
+Le taux sans risque mensuel est obtenu de la Réserve Fédérale US. A diviser par 12 pour être cohérent avec les rendement des titres.
+
+```{r, echo=TRUE}
+tmp <- read.csv("DP_LIVE_01032020211755676.csv", header=TRUE, sep=";")[, c("TIME", "Value")]
+dt <- ymd(paste(tmp$TIME, "-01", sep=""))
+rf_rate <- xts((tmp$Value/100.0)/12, dt)
+colnames(rf_rate) <- "Rf"
+monthly.ret.2 <- merge.xts(monthly.ret, rf_rate, join="inner")
+```
+```{r, fig.cap="taux sans risque mensuel"}
+plot(rf_rate)
+```
+
+# Estimation d'un modèle à un facteur
+
+* Utiliser l'indice SPY comme proxy pour le marché et estimer pour chaque titre le modèle:
+
+$$
+R_i(t) - R_f(t) = \alpha + \beta (R_M(t) - R_f(t)) + \epsilon(t)
+$$
+en utilisant la fonction \texttt{lm}.  
+
+* Placer chaque titre sur un diagramme rendement/beta et calculer par regression la droite de marché des titres risqués. 
+```{r,echo=TRUE, include=TRUE}
+assets <- names(monthly.ret)[names(monthly.ret) != "SPY"]
+get.ret.beta <- function(ret){
+  res.mean <- apply(ret,2,mean)
+  res.mean <- res.mean - mean(rf_rate)
+  res.mean <- res.mean[assets]
+
+  ret.minus.rf <- as.data.frame(lapply(ret, function(col) col-ret$Rf))
+  ret.minus.rf <- ret.minus.rf[names(ret.minus.rf) != "Rf"]
+
+  model <- lapply(ret.minus.rf, function(col) lm(col ~ ret.minus.rf$SPY))
+
+  res.beta <- lapply(model, function(value) coefficients(value)[2])
+  res.beta <- res.beta[names(res.beta) != "SPY"]
+
+  return(as.data.frame(cbind(res.mean,res.beta)))
+
+}
+ret.beta.all <- get.ret.beta(monthly.ret.2)
+```
+
+```{r,fig-1,fig.cap="diagramme rendement béta de chaque titre",include=TRUE, echo=FALSE}
+plot(as.numeric(ret.beta.all$res.mean)~as.numeric(ret.beta.all$res.beta), xlab=expression(beta), ylab="excess return", main="Diagramme rendement / beta en fonction du SPY",col="blue")
+abline(lm(as.numeric(ret.beta.all$res.mean)~as.numeric(ret.beta.all$res.beta)),col="red")
+text(as.numeric(ret.beta.all$res.mean)~as.numeric(ret.beta.all$res.beta), labels=names(ret.beta.all$res.mean), pos=4, cex=0.7, col="blue")
+legend(x="topleft",legend="droite de marché\ndes titres risqués",col="red",lty=1)
+```
+
+* En déduire les titres qui, selon ce modèle, *semblent* chers et ceux qui semblent sous-évalués.
+
+Les titres se trouvant au-dessus de la droite de marché sont considérés comme sous-évalués tandis que les titres se trouvant en-dessous sont surévalués.
+Certains titres ne sont pas exactement sur cette droite, cependant ils ne s'en éloignent pas trop.
+On peut dire que :  
+
+**sous-évalués :**   
+  
+* Apple (AAPL)
+* Amazon (AMZN)  
+ 
+**surévalués :**  
+
+* XOM
+* MMM
+* F  
+
+
+
+Est-ce que ces mesures de cherté relative vous semble correctes? Essayez de mesurer la robustesse de ce calcul en estimant le modèles sur des sous-intervalles de temps.
+
+Présentez vos résultats de manière synthétique.  
+
+Dans un premier temps, nous avons réalisé la même modélisation pour chaque année.  
+Au lieu d'appliquer la regression sur toutes les données, nous les avons appliquer distinctement pour chaque année. 
+
+```{r, fig-2, fig.caption="régression année par année", fig.show="hold", out.width="50%", out.height="50%"}
+# Period : year
+for(year in unique(format(index(monthly.ret),format="%Y"))){
+  if(year != "2020"){
+  assign(paste("ret.beta.",year,sep=""),get.ret.beta(monthly.ret.2[year]))
+  x<-as.numeric(get(paste("ret.beta.",year,sep=""))$res.beta)
+  y<-as.numeric(get(paste("ret.beta.",year,sep=""))$res.mean)
+  plot(x,y,main=paste("Année : ",year),xlab=expression(beta),ylab="excess return")
+  abline(lm(y~x),col="red")
+  text(y~x, labels=names(get(paste("ret.beta.",year,sep=""))$res.mean), pos=4, cex=0.7, col="blue")
+  position <- if(year %in% c("2008","2011"))  "topright" else "topleft"
+  legend(x=position,legend="droite de marché\ndes titres risqués",col="red",lty=1)
+  }
+}
+```
+
+Nous avons tracé les diagrammes rendement / béta pour chaque année entre 2007 et 2020. On peut remarquer que Apple est sous-évalué dans les années
+2007, 2009, 2010 alors qu'il est surévalué dans les années 2008, 2013, 2015. Ceci est un exemple mais on pourrait faire la même remarque pour chaque titre.
+Ceci nous ammène à remmettre en cause la robustesse de cette méthode. En effet selon les intervalles de temps nous obtenons des résultats contradictoires.
+
+```{r,echo=TRUE}
+names_ <- names(get.ret.beta(monthly.ret.2)$res.mean)
+beta.roll <- na.omit(rollapply(
+  data=monthly.ret.2,
+  FUN=function(data) as.numeric(get.ret.beta(data)$res.beta),
+  width=36,
+  by.column=FALSE))
+alpha.roll <- na.omit(rollapply(
+  data=monthly.ret.2,
+  FUN=function(data) as.numeric(get.ret.beta(data)$res.mean),
+  width=36,
+  by.column=FALSE))
+names(beta.roll) <- names_
+names(alpha.roll) <- names_
+```
+```{r,fig-3,fig.cap="rolling beta / alpha ",echo=FALSE,fig.show="hold", out.width="50%"}
+plot(beta.roll,legend.loc="topright")
+plot(alpha.roll,legend.loc="topright")
+```
+
+Afin d'avoir une analyse plus précise, nous avons calculé les $\beta$ et $\alpha$ pour chaque titre sur des fenêtres glissantes (de taille 36).
+On remarque que les $\beta$ varient dans un "range" assez important alors que les variations des $\alpha$ sont moins importantes.
+
+Le modèle utilisé montre des limites pour l'estimation des $\beta$
+
+# Modèle de Treynor-Black
+
+Le modèle de Treynor-Black a pour objectif d'exploiter les informations calculées en première partie. L'idée étant de constituer un portefeuille "actif" avec les titres qui semblent mal valorisés par le marché, et allouer le reste de sa richesse au portefeuille de marché.
+
+## Selection des titres à inclure dans le portefeuille actif.
+
+C'est l'étape délicate de la méthode de Treynor-Black. A partir de l'évaluation du modèle à un facteur, déterminez quels titres méritent de figurer dans le portefeuille actif. En théorie, on a envie d'acheter les titres sous-cotés ($\alpha_i > 0$) mais cette anomalie n'est peut être qu'apparente! Il faut également apprécier la qualité de l'estimation statistique. 
+
+En testant diverses combinaisons de titres à mettre dans le portefeuille actif, vous pourrez mesurer la sensibilité de modèle de Treynor-Black aux données.
+
+```{r, echo=TRUE}
+monthly.ret.minus.rf <- as.data.frame(monthly.ret - mean(rf_rate))
+model <- lapply(monthly.ret.minus.rf, function(col) lm(col ~ monthly.ret.minus.rf$SPY))
+model <- model[names(model) != "SPY"]
+```
+* Sélectionner les $\alpha_{i} > 0$
+```{r,echo=TRUE}
+titre.selected.simple <- names(
+  model[lapply(model, function(titre) coefficients(titre)[1]) 
+  > 0]
+  )
+```
+```{r,echo=FALSE,results=TRUE}
+print(titre.selected.simple)
+```
+* Test statistique, niveau de confiance à 95% / 99% $\alpha_{i} > 0$
+```{r,echo=TRUE}
+titre.selected.inter <- names(
+  model[as.logical(lapply(model,
+  function(titre) confint(titre)[1,1]>0 & confint(titre)[1,2]>0))]
+  )
+```
+
+```{r, echo=FALSE, results=TRUE}
+print(titre.selected.inter)
+```
+
+## Détermination du portefeuille actif
+
+Ayant choisi les titres à inclure dans le portefeuille actif,
+on rappelle que le poids de chaque titre dans le portefeuille actif est proportionnel au ratio $\alpha_i/\sigma^2(\epsilon_i)$:
+
+$$
+w_i = \frac{\alpha_i/\sigma^2(\epsilon_i)}{\sum_i \alpha_i/\sigma^2(\epsilon_i)}
+$$
+
+Calculer les poids des actifs dans le portefeuille actif. Justifier votre choix d'inclure ou d'exclure tel ou tel instrument.
+
+```{r,echo=TRUE}
+get.weight <- function(model) {
+  alpha <- as.data.frame(lapply(model, function(model) {coefficients(model)[1]}))
+  residual <- as.data.frame(lapply(model, function(model) {sigma(model)}))
+  denominateur <- sum(alpha / residual)
+  return(alpha / residual / denominateur)
+
+}
+simple.weight <- get.weight(model[names(model) %in% titre.selected.simple])
+inter.weight <- get.weight(model[names(model) %in% titre.selected.inter])
+```
+```{r,echo=FALSE}
+kbl(round(simple.weight,3), format="latex", booktabs=T, caption="Poids (hypothèse simple)",row.names=FALSE) %>%kable_styling(latex_options="HOLD_position")
+kbl(round(inter.weight,3), format="latex", booktabs=T, caption="Poids (interval confiance)",row.names=FALSE) %>%kable_styling(latex_options="HOLD_position")
+```
+
+Calculez les valeurs suivantes concernant le portefeuille actif:
+
+```{r}
+active.portfolio <- function(model,label){
+  weights <- get.weight(model)
+  alpha <- as.data.frame(lapply(model, function(model) {coefficients(model)[1]}))
+  beta <- as.data.frame(lapply(model, function(model) {coefficients(model)[2]}))
+  residual <- as.data.frame(lapply(model, function(model) {sigma(model)}))
+  alpha.port <- sum(weights*alpha)
+  beta.port <- sum(weights*beta)
+  var.res.port <- sum(weights*weights*residual)
+  excess.ret.port <- alpha.port + beta.port*mean(monthly.ret$SPY)
+  std.port <- sqrt(beta.port^2*var(monthly.ret$SPY) + var.res.port)
+
+  data <- data.frame(
+    c(excess.ret.port,alpha.port,beta.port,std.port,var.res.port),
+    row.names=c("R_a","alpha_a","beta_a","sigma_a","sigma2_ea")
+  )
+
+  names(data) <- label
+
+  return(data)
+}
+simple.summary <- active.portfolio(model[names(model) %in% titre.selected.simple],"simple")
+inter.summary <- active.portfolio(model[names(model) %in% titre.selected.inter],"interval")
+```
+
+\begin{description}
+\item[$R_A$] Excess de rendement
+\item[$\alpha_A$] alpha du portefeuille actif
+\item[$\beta_A$]  beta du portefeuille actif
+\item[$\sigma_A$] ecart-type du portefeuille actif
+\item[$\sigma^2(e_A)$] variance résiduelle du portefeuille actif
+
+\end{description}
+
+```{r,echo=FALSE}
+kbl(cbind(simple.summary,inter.summary), format="latex", booktabs=T, caption="Résumé des portefeuilles") %>%kable_styling(latex_options="HOLD_position")
+```
+
+
+## Détermination de la pondération entre le portefeuille actif et le portefeuille de marché.
+
+On rappelle l'allocation de richesse au portefeuille actif:
+
+$$
+w_A = \frac{\alpha_A \sigma^2_M}{\alpha_A \sigma^2_M (1-\beta_A) + R_M \sigma^2(e_A)}
+$$
+
+Avec:
+
+$$
+\begin{aligned}
+R_A & = \alpha_A + \beta_A R_M \\
+\sigma^2_A & = \beta^2_A \sigma^2_M + \sigma^2(e_A)
+\end{aligned}
+$$
+
+
+
+## Capital Allocation Line
+
+Calculez l'espérance de rendement et le risque de quelques portefeuilles situés sur la "Capital Allocation Line" qui joint l'actif sans risque et le portefeuille tangent.
+ Placez la solution du modèle de Treynor-Black, le portefeuille actif et le portefeuille de marché sur le graphique ci-dessous.
+
+
+```{r, echo=TRUE}
+Assets <- c("AAPL", "AMZN", "MSFT", "F",  "XOM", "MMM",  "HD",   "PG",   "KO")
+plot.data <- monthly.ret.2[, c(Assets, "Rf")]
+for(a in Assets) {
+  plot.data[, a] <- plot.data[, a] - plot.data$Rf
+  }
+
+res <- data.frame(Mean=apply(plot.data[, Assets],2,mean),
+                  Sd = apply(plot.data[, Assets],2,sd))
+rownames(res) <- Assets
+```
+```{r,echo=TRUE}
+# Capital Market line
+mu <- colMeans(monthly.ret[,Assets])
+mu.free <- mean(rf_rate)
+mu.star.v <- seq(from=mu.free,to=0.35,length.out=30)
+n <- length(mu)
+Sigma <- cov(monthly.ret[,Assets])
+
+optim.with.rf <- function(mu.star){
+  A.sum <- matrix(mu - mu.free, ncol=1)
+  A.mat <- cbind(A.sum,rep(1,n))
+  b <- c(mu.star,1)
+  return(solve.QP(2*Sigma, rep(0,n),A.mat,b,meq=2))
+}
+
+sol.with.rf <- NULL
+for(mu.star in mu.star.v) {
+  qp <- optim.with.rf(mu.star)
+
+  tmp <- matrix(c(mu.star,sqrt(qp$value)),nrow=1)
+
+  if(is.null(sol.with.rf)){
+    sol.with.rf <- tmp
+  } else{
+    sol.with.rf <- rbind(sol.with.rf,tmp)
+  }
+}
+```
+```{r,echo=TRUE}
+# market portfolio
+mu <- colMeans(monthly.ret.2)
+sig2 <- cov(monthly.ret[,Assets])
+
+w.t.nom <- solve(sig2,mu[Assets] - mu["Rf"])
+w.t.den <- sum(w.t.nom)
+w.t <- w.t.nom / w.t.den
+
+mu.t <- t(mu[Assets] - mu.free) %*% w.t
+sigma.t <- sqrt(t(w.t) %*% sig2 %*% w.t)
+```
+
+```{r,echo=TRUE}
+# Active portfolio
+get.active.port <- function(weight){
+  titres <- names(weight)
+  w.a <- as.numeric(weight)
+  sig2.a <- cov(monthly.ret[,titres])
+  mu.a <- t(w.a) %*% as.numeric(matrix(mu[titres]),ncol=1)
+  sigma.a <- sqrt(t(w.a) %*% sig2.a %*% w.a)
+  return(data.frame("mu.a" = mu.a,"sigma.a"=sigma.a))
+}
+active.inter <- get.active.port(inter.weight)
+active.simple <- get.active.port(simple.weight)
+```
+
+```{r, echo=TRUE}
+# Solution Treynor
+get.w.A <- function(port.summary){
+  benchmark.var <- var(monthly.ret$SPY)
+  benchmark.ret <- mean(monthly.ret$SPY)
+  w.a.num <- port.summary["alpha_a",] * benchmark.var
+  w.a.den <- port.summary["alpha_a",] * benchmark.var * (1 - port.summary["beta_a",]) + benchmark.ret*port.summary["sigma2_ea",]
+  return(w.a.num / w.a.den)
+}
+get.TB.port <- function(active.weight,active.port){
+  w.TB = c(active.weight,1-active.weight)
+  mu.TB <- t(w.TB) %*% c(active.port$mu.a,mu.t)
+  sigma.TB = t(w.TB) %*% c(active.port$sigma.a,sigma.t)
+  return(data.frame("mu.TB"=mu.TB,"sigma.TB"=sigma.TB))
+}
+
+TB.inter <- get.TB.port(get.w.A(inter.summary),active.inter)
+TB.simple <- get.TB.port(get.w.A(simple.summary),active.simple)
+```
+```{r,echo=FALSE,fig.show="hold", out.width="50%"}
+plot(Mean ~ Sd, data=res, xlim=c(0, 0.4), ylim=c(0, .05), xlab=expression(sigma),
+     ylab="Excess Return", cex=.5, bty="n", cex.lab=1,main="Titres sélectionnés avec les intervalles de confiance")
+with(res, text(Mean ~ Sd, labels=row.names(res), pos=4, cex=0.7, col="blue"))
+
+points(sol.with.rf[,2],sol.with.rf[,1],type="l",col="purple")
+legend(x="topleft",legend="CAL",col="purple",lty=1)
+
+# Tangent / Market
+text(sigma.t,mu.t,labels="portefeuille marché",col="green",pos=4)
+points(sigma.t,mu.t,col="green")
+
+# Active
+text(active.inter$sigma.a,active.inter$mu.a,labels="actif",col="red",pos=4)
+points(active.inter$sigma.a,active.inter$mu.a,col="red")
+
+# TB
+text(TB.inter$sigma.TB,TB.inter$mu.TB,labels="tb",col="black",pos=2)
+points(TB.inter$sigma.TB,TB.inter$mu.TB,col="black")
+
+
+plot(Mean ~ Sd, data=res, xlim=c(0, 0.4), ylim=c(0, .05), xlab=expression(sigma),
+     ylab="Excess Return", cex=.5, bty="n", cex.lab=1, main="titre selectionnés avec alphas > 0")
+with(res, text(Mean ~ Sd, labels=row.names(res), pos=4, cex=0.7, col="blue"))
+
+points(sol.with.rf[,2],sol.with.rf[,1],type="l",col="purple")
+legend(x="topleft",legend="CAL",col="purple",lty=1)
+
+
+# Tangent / Market
+text(sigma.t,mu.t,labels="portefeuille marché",col="green",pos=4)
+points(sigma.t,mu.t,col="green")
+
+# Active
+text(active.simple$sigma.a,active.simple$mu.a,labels="actif",col="red",pos=4)
+points(active.simple$sigma.a,active.simple$mu.a,col="red")
+
+# TB
+text(TB.simple$sigma.TB,TB.simple$mu.TB,labels="tb",col="black",pos=2)
+points(TB.simple$sigma.TB,TB.simple$mu.TB,col="black")
+```
